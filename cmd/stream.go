@@ -91,21 +91,11 @@ You can specify a single stream key or provide a CSV file with multiple keys.`,
 		keys := []string{}
 
 		if csvPath != "" {
-			file, err := os.Open(csvPath)
+			csvKeys, err := readKeysFromCSV(csvPath)
 			if err != nil {
-				return fmt.Errorf("error opening CSV file: %w", err)
+				return err
 			}
-			defer file.Close()
-
-			reader := csv.NewReader(file)
-			records, err := reader.ReadAll()
-			if err != nil {
-				return fmt.Errorf("error reading CSV file: %w", err)
-			}
-
-			for _, record := range records {
-				keys = append(keys, record[0])
-			}
+			keys = append(keys, csvKeys...)
 		}
 
 		if key != "" {
@@ -179,13 +169,38 @@ You can specify a single stream key or provide a CSV file with multiple keys.`,
 	},
 }
 
+func readKeysFromCSV(path string) (keys []string, err error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("error opening CSV file: %w", err)
+	}
+	defer func() {
+		if cerr := file.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("error closing CSV file: %w", cerr)
+		}
+	}()
+
+	reader := csv.NewReader(file)
+	records, err := reader.ReadAll()
+	if err != nil {
+		return nil, fmt.Errorf("error reading CSV file: %w", err)
+	}
+
+	for _, record := range records {
+		keys = append(keys, record[0])
+	}
+	return keys, nil
+}
+
 func init() {
 	streamCmd.Flags().StringVarP(&image, "image", "i", "", "Path to the image file to stream (required)")
 	streamCmd.Flags().StringVarP(&key, "key", "k", "", "Single YouTube stream key")
 	streamCmd.Flags().StringVarP(&csvPath, "csv", "c", "", "Path to CSV file with stream keys")
 	streamCmd.Flags().StringVarP(&resolution, "resolution", "r", "1920x1080", "Output resolution (e.g. 1920x1080, 1280x720)")
 
-	streamCmd.MarkFlagRequired("image")
+	if err := streamCmd.MarkFlagRequired("image"); err != nil {
+		log.Fatalf("error marking flag as required: %v", err)
+	}
 
 	rootCmd.AddCommand(streamCmd)
 }
