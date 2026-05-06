@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/spf13/cobra"
@@ -16,10 +18,47 @@ import (
 
 // cli parameters
 var (
-	image   string
-	key     string
-	csvPath string
+	image      string
+	key        string
+	csvPath    string
+	resolution string
 )
+
+// bitsPerPixelKbps is the empirically-derived ratio of kbps needed per pixel
+// for a still-image H.264 stream at 10fps with tune=stillimage. This value
+// sits safely between YouTube's minimum requirements and the recommended
+// bitrates for full-motion video, optimized for keeping a stream alive with
+// minimal bandwidth.
+const bitsPerPixelKbps = 0.00075
+
+// minBitrateKbps is the minimum bitrate floor to ensure stream stability
+// at very low resolutions.
+const minBitrateKbps = 500
+
+func getBitrateForResolution(width, height int) int {
+	pixels := width * height
+	bitrate := int(float64(pixels) * bitsPerPixelKbps)
+	if bitrate < minBitrateKbps {
+		return minBitrateKbps
+	}
+	return bitrate
+}
+
+func parseResolution(res string) (int, int, error) {
+	parts := strings.SplitN(res, "x", 2)
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("invalid resolution format %q, expected WxH (e.g. 1920x1080)", res)
+	}
+	w, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid width %q: %w", parts[0], err)
+	}
+	h, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid height %q: %w", parts[1], err)
+	}
+	return w, h, nil
+}
 
 var streamCmd = &cobra.Command{
 	Use:   "stream",
@@ -38,6 +77,17 @@ You can specify a single stream key or provide a CSV file with multiple keys.`,
 		return nil
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
+		width, height, err := parseResolution(resolution)
+		if err != nil {
+			return err
+		}
+		bitrate := getBitrateForResolution(width, height)
+		bitrateStr := fmt.Sprintf("%dk", bitrate)
+		bufsizeStr := fmt.Sprintf("%dk", bitrate*2)
+		vf := fmt.Sprintf("scale=%d:%d,format=yuv420p", width, height)
+
+		log.Printf("Resolution: %dx%d, Bitrate: %s, Bufsize: %s", width, height, bitrateStr, bufsizeStr)
+
 		keys := []string{}
 
 		if csvPath != "" {
@@ -87,14 +137,14 @@ You can specify a single stream key or provide a CSV file with multiple keys.`,
 					"-i", image,
 					"-f", "lavfi",
 					"-i", "anullsrc=r=44100:cl=stereo",
-					"-vf", "format=yuv420p",
+					"-vf", vf,
 					"-r", "10",
 					"-c:v", "libx264",
 					"-preset", "veryfast",
 					"-tune", "stillimage",
-					"-b:v", "1500k",
-					"-maxrate", "1500k",
-					"-bufsize", "3000k",
+					"-b:v", bitrateStr,
+					"-maxrate", bitrateStr,
+					"-bufsize", bufsizeStr,
 					"-g", "300",
 					"-c:a", "aac",
 					"-b:a", "128k",
@@ -120,7 +170,7 @@ You can specify a single stream key or provide a CSV file with multiple keys.`,
 			})
 		}
 
-		err := eg.Wait()
+		err = eg.Wait()
 		if err != nil {
 			log.Printf("Completed with error(s): %v\n", err)
 		}
@@ -133,6 +183,7 @@ func init() {
 	streamCmd.Flags().StringVarP(&image, "image", "i", "", "Path to the image file to stream (required)")
 	streamCmd.Flags().StringVarP(&key, "key", "k", "", "Single YouTube stream key")
 	streamCmd.Flags().StringVarP(&csvPath, "csv", "c", "", "Path to CSV file with stream keys")
+	streamCmd.Flags().StringVarP(&resolution, "resolution", "r", "1920x1080", "Output resolution (e.g. 1920x1080, 1280x720)")
 
 	streamCmd.MarkFlagRequired("image")
 
