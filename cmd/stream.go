@@ -11,9 +11,9 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
-	"golang.org/x/sync/errgroup"
 )
 
 // cli parameters
@@ -112,60 +112,56 @@ You can specify a single stream key or provide a CSV file with multiple keys.`,
 		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 		go func() {
 			<-sigChan
-			log.Println("Shutting down ffmpeg processes...")
+			log.Println("Shutting down ffmpeg...")
 			cancel()
 		}()
 
-		eg, ctx := errgroup.WithContext(ctx)
+		// Build tee muxer output string
+		outputs := make([]string, len(keys))
+		for i, k := range keys {
+			outputs[i] = fmt.Sprintf("[f=flv:onfail=ignore]rtmp://a.rtmp.youtube.com/live2/%s", k)
+		}
+		teeOutput := strings.Join(outputs, "|")
 
-		for _, key := range keys {
-			eg.Go(func() error {
-				ffmpegArgs := []string{
-					"-re",
-					"-loop", "1",
-					"-f", "image2",
-					"-i", image,
-					"-f", "lavfi",
-					"-i", "anullsrc=r=44100:cl=stereo",
-					"-vf", vf,
-					"-r", "10",
-					"-c:v", "libx264",
-					"-preset", "veryfast",
-					"-tune", "stillimage",
-					"-b:v", bitrateStr,
-					"-maxrate", bitrateStr,
-					"-bufsize", bufsizeStr,
-					"-g", "300",
-					"-c:a", "aac",
-					"-b:a", "128k",
-					"-reconnect", "1",
-					"-reconnect_streamed", "1",
-					"-reconnect_delay_max", "5",
-					"-f", "flv",
-					fmt.Sprintf("rtmp://a.rtmp.youtube.com/live2/%s", key),
-				}
-
-				ffmpeg := exec.CommandContext(ctx, "ffmpeg", ffmpegArgs...)
-				ffmpeg.Stdout = nil
-				ffmpeg.Stderr = nil
-
-				log.Printf("Starting ffmpeg for key %s", key)
-
-				err := ffmpeg.Run()
-				if err != nil && ctx.Err() != context.Canceled {
-					return fmt.Errorf("failed to run ffmpeg: %w", err)
-				}
-
-				return nil
-			})
+		ffmpegArgs := []string{
+			"-re",
+			"-loop", "1",
+			"-f", "image2",
+			"-i", image,
+			"-f", "lavfi",
+			"-i", "anullsrc=r=44100:cl=stereo",
+			"-vf", vf,
+			"-r", "10",
+			"-c:v", "libx264",
+			"-preset", "veryfast",
+			"-tune", "stillimage",
+			"-b:v", bitrateStr,
+			"-maxrate", bitrateStr,
+			"-bufsize", bufsizeStr,
+			"-g", "20",
+			"-c:a", "aac",
+			"-b:a", "128k",
+			"-map", "0:v",
+			"-map", "1:a",
+			"-f", "tee",
+			teeOutput,
 		}
 
-		err = eg.Wait()
-		if err != nil {
-			log.Printf("Completed with error(s): %v\n", err)
-		}
+		// Restart loop: if ffmpeg exits unexpectedly, restart after a short delay
+		for {
+			ffmpeg := exec.CommandContext(ctx, "ffmpeg", ffmpegArgs...)
+			ffmpeg.Stdout = nil
+			ffmpeg.Stderr = os.Stderr
 
-		return nil
+			log.Printf("Starting ffmpeg with %d output(s)", len(keys))
+
+			err = ffmpeg.Run()
+			if ctx.Err() != nil {
+				return nil // graceful shutdown
+			}
+			log.Printf("ffmpeg exited unexpectedly: %v, restarting in 5s...", err)
+			time.Sleep(5 * time.Second)
+		}
 	},
 }
 
